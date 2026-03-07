@@ -1,0 +1,28 @@
+{
+  "name": "vibeworld",
+  "version": "0.1.0",
+  "description": "Multiplayer text RPG via MCP",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^11.8.2",
+    "express": "^5.1.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.2",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^4.0.18"
+  }
+}
