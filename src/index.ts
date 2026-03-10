@@ -92,7 +92,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-  logger.info('server', `VibeWorld running on port ${PORT}`, { port: PORT });
+  logger.info('server', `VibeTheWorld running on port ${PORT}`, { port: PORT });
   logger.info('server', `MCP endpoint: http://localhost:${PORT}/mcp`);
   logger.info('server', `Health check: http://localhost:${PORT}/health`);
 });

@@ -10,7 +10,7 @@ RUN npm run build
 
 RUN mkdir -p /data
 
-ENV DATABASE_PATH=/data/vibeworld.db
+ENV DATABASE_PATH=/data/vibetheworld.db
 ENV NODE_ENV=production
 
 EXPOSE 3000

@@ -10,7 +10,7 @@ import { generateTutorialQuests } from '../game/quests.js';
 export function registerAuthTools(server: McpServer): void {
   server.tool(
     'register',
-    'Register a new character in VibeWorld. Returns a token for authentication.',
+    'Register a new character in VibeTheWorld. Returns a token for authentication.',
     {
       name: z.string().min(2).max(24).regex(/^[a-zA-Z0-9_ -]+$/, 'Name must contain only letters, numbers, spaces, underscores, and hyphens.').describe('Character name (2-24 chars, alphanumeric + _ - space)'),
       password: z.string().min(6).max(64).describe('Password for the account (min 6 chars)'),
@@ -45,7 +45,7 @@ export function registerAuthTools(server: McpServer): void {
         return {
           content: [{
             type: 'text',
-            text: `Welcome to VibeWorld, ${player.name}!\n\nYour token: ${player.token}\n\n${spawnInfo} with ${player.gold} gold.\nUse this token in all subsequent commands.\n\nTip: Use \`look\` to see your surroundings. Check your tutorial quests with \`daily_quests\` to get started!`
+            text: `Welcome to VibeTheWorld, ${player.name}!\n\nYour token: ${player.token}\n\n${spawnInfo} with ${player.gold} gold.\nUse this token in all subsequent commands.\n\nTip: Use \`look\` to see your surroundings. Check your tutorial quests with \`daily_quests\` to get started!`
           }]
         };
       } catch (e: any) {

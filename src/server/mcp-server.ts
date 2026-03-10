@@ -30,7 +30,7 @@ import { registerDuelTools } from '../tools/duel-tools.js';
 
 export function createMcpServer(): McpServer {
   const server = new McpServer({
-    name: 'VibeWorld',
+    name: 'VibeTheWorld',
     version: '0.1.0',
   });
 

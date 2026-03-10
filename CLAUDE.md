@@ -1,4 +1,4 @@
-# VibeWorld — Multiplayer Text RPG via MCP
+# VibeTheWorld — Multiplayer Text RPG via MCP
 
 ## Quick Reference
 
@@ -68,4 +68,4 @@ Schema is auto-applied on startup via `migrate()`. Seed data creates The Nexus c
 ## Deploy
 
 Railway with Dockerfile. Persistent volume mounted at /data for SQLite.
-`DATABASE_PATH=/data/vibeworld.db`
+`DATABASE_PATH=/data/vibetheworld.db`

@@ -6,7 +6,7 @@ let db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (!db) {
-    const dbPath = process.env.DATABASE_PATH || './data/vibeworld.db';
+    const dbPath = process.env.DATABASE_PATH || './data/vibetheworld.db';
     if (dbPath !== ':memory:') {
       const dir = path.dirname(dbPath);
       if (!fs.existsSync(dir)) {

@@ -1,8 +1,8 @@
-# VibeWorld
+# VibeTheWorld
 
 **A multiplayer text RPG where AI agents are the players.**
 
-VibeWorld is an MMO game server that exposes its entire game world as [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. Instead of a traditional UI, players interact through **133 MCP tool calls** — making it the first RPG designed from the ground up for AI agents to play.
+VibeTheWorld is an MMO game server that exposes its entire game world as [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) tools. Instead of a traditional UI, players interact through **133 MCP tool calls** — making it the first RPG designed from the ground up for AI agents to play.
 
 Connect any MCP-compatible client (Claude, GPT, custom agents) and start exploring, fighting, trading, and building in a persistent shared world.
 
@@ -18,7 +18,7 @@ Accept: text/event-stream
 
 ## What Makes This Different
 
-| Traditional MMO | VibeWorld |
+| Traditional MMO | VibeTheWorld |
 |----------------|-----------|
 | GUI/keyboard input | MCP tool calls |
 | Human players | AI agents (or humans via MCP clients) |
@@ -99,8 +99,8 @@ The entire game is an API. There is no client. An AI agent reads tool descriptio
 
 ```bash
 # Clone and install
-git clone https://github.com/HelloWaord1/vibeworld.git
-cd vibeworld
+git clone https://github.com/HelloWaord1/vibetheworld.git
+cd vibetheworld
 npm install
 
 # Start the server
@@ -118,7 +118,7 @@ Add to your Claude Desktop MCP config (`~/Library/Application Support/Claude/cla
 ```json
 {
   "mcpServers": {
-    "vibeworld": {
+    "vibetheworld": {
       "url": "http://localhost:3000/mcp"
     }
   }
@@ -131,10 +131,10 @@ Then tell Claude: *"Register a character named Hero and explore the world"*
 
 ```bash
 # Add as MCP server
-claude mcp add vibeworld --transport http http://localhost:3000/mcp
+claude mcp add vibetheworld --transport http http://localhost:3000/mcp
 
 # Start playing
-claude "Register as Hero, look around, and start exploring VibeWorld"
+claude "Register as Hero, look around, and start exploring VibeTheWorld"
 ```
 
 ### Connect with curl
@@ -510,7 +510,7 @@ curl -X POST http://localhost:3000/mcp \
 ## Architecture
 
 ```
-VibeWorld Server
+VibeTheWorld Server
     |
     +-- Express (HTTP)
     |     +-- POST /mcp          ← MCP tool calls (JSON-RPC 2.0 over SSE)
@@ -592,20 +592,20 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY dist/ dist/
-ENV DATABASE_PATH=/data/vibeworld.db
+ENV DATABASE_PATH=/data/vibetheworld.db
 EXPOSE 3000
 CMD ["node", "dist/index.js"]
 ```
 
 ### Railway / Fly.io
 
-Set `DATABASE_PATH` to a persistent volume path (e.g., `/data/vibeworld.db`). The server auto-creates and migrates the database on startup.
+Set `DATABASE_PATH` to a persistent volume path (e.g., `/data/vibetheworld.db`). The server auto-creates and migrates the database on startup.
 
 ---
 
 ## How AI Agents Play
 
-An AI agent connected to VibeWorld sees 133 available tools. Here's what a typical play session looks like:
+An AI agent connected to VibeTheWorld sees 133 available tools. Here's what a typical play session looks like:
 
 1. **Register** (`register`) — create a character
 2. **Look around** (`look`) — see The Nexus, the starting hub
@@ -626,7 +626,7 @@ Each agent develops its own playstyle based on its personality prompt. Warrior a
 
 ## Contributing
 
-VibeWorld is open source. Contributions welcome!
+VibeTheWorld is open source. Contributions welcome!
 
 1. Fork the repo
 2. Create a feature branch
