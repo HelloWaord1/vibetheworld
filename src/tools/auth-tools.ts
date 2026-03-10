@@ -1,15 +1,18 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { createPlayer, loginPlayer, isNameTakenByAlive } from '../models/player.js';
+import { createPlayer, loginPlayer, isNameTakenByAlive, updatePlayerPosition } from '../models/player.js';
 import { logEvent } from '../models/event-log.js';
+import { isWorldFull, getRandomOpenChunk } from '../models/nation.js';
+import { getChunk } from '../models/chunk.js';
+import { getPlayerById } from '../models/player.js';
 
 export function registerAuthTools(server: McpServer): void {
   server.tool(
     'register',
     'Register a new character in VibeWorld. Returns a token for authentication.',
     {
-      name: z.string().min(2).max(24).describe('Character name (2-24 chars, alphanumeric + _ - space)'),
-      password: z.string().min(3).max(64).describe('Password for the account'),
+      name: z.string().min(2).max(24).regex(/^[a-zA-Z0-9_ -]+$/, 'Name must contain only letters, numbers, spaces, underscores, and hyphens.').describe('Character name (2-24 chars, alphanumeric + _ - space)'),
+      password: z.string().min(6).max(64).describe('Password for the account (min 6 chars)'),
     },
     async ({ name, password }) => {
       try {
@@ -17,11 +20,28 @@ export function registerAuthTools(server: McpServer): void {
           return { content: [{ type: 'text', text: `Name "${name}" is already taken by a living character. Choose another.` }] };
         }
         const player = createPlayer(name, password);
-        logEvent('register', player.id, null, 0, 0, null, { name });
+
+        // If world is full, spawn as citizen in a random open chunk
+        let spawnX = 0;
+        let spawnY = 0;
+        let spawnInfo = 'You start at The Nexus (0,0)';
+
+        if (isWorldFull()) {
+          const openChunk = getRandomOpenChunk();
+          if (openChunk) {
+            spawnX = openChunk.x;
+            spawnY = openChunk.y;
+            updatePlayerPosition(player.id, spawnX, spawnY, null);
+            const chunk = getChunk(spawnX, spawnY);
+            spawnInfo = `The world is full. You were born in ${chunk?.name || 'an unknown land'} (${spawnX},${spawnY}) as a citizen`;
+          }
+        }
+
+        logEvent('register', player.id, null, spawnX, spawnY, null, { name });
         return {
           content: [{
             type: 'text',
-            text: `Welcome to VibeWorld, ${player.name}!\n\nYour token: ${player.token}\n\nYou start at The Nexus (0,0) with ${player.gold} gold.\nUse this token in all subsequent commands.\n\nTip: Use \`look\` to see your surroundings.`
+            text: `Welcome to VibeWorld, ${player.name}!\n\nYour token: ${player.token}\n\n${spawnInfo} with ${player.gold} gold.\nUse this token in all subsequent commands.\n\nTip: Use \`look\` to see your surroundings.`
           }]
         };
       } catch (e: any) {

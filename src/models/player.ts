@@ -31,8 +31,8 @@ export function loginPlayer(name: string, password: string): Player | null {
 
 export function getPlayerByToken(token: string): Player | null {
   const db = getDb();
-  const player = db.prepare('SELECT * FROM players WHERE token = ? AND is_alive = 1').get(token) as Player | undefined;
-  if (player) {
+  const player = db.prepare('SELECT * FROM players WHERE token = ?').get(token) as Player | undefined;
+  if (player && player.is_alive) {
     db.prepare(`UPDATE players SET last_active_at = datetime('now') WHERE id = ?`).run(player.id);
   }
   return player || null;
@@ -89,22 +89,29 @@ export function updatePlayerStats(id: number, stats: Partial<Pick<Player, 'stren
 export function addXp(id: number, amount: number): { leveled_up: boolean; new_level: number; stat_points: number } {
   const db = getDb();
   const player = getPlayerById(id)!;
-  const newXp = player.xp + amount;
-  const xpNeeded = player.level * 100;
+  let remainingXp = player.xp + amount;
+  let currentLevel = player.level;
   let leveled_up = false;
-  let new_level = player.level;
-  let stat_points = 0;
+  let totalStatPoints = 0;
+  let levelsGained = 0;
 
-  if (newXp >= xpNeeded) {
-    new_level = player.level + 1;
+  // Loop to handle multi-level ups
+  while (remainingXp >= currentLevel * 100) {
+    remainingXp -= currentLevel * 100;
+    currentLevel++;
+    levelsGained++;
+    totalStatPoints += 2;
     leveled_up = true;
-    stat_points = 2;
-    db.prepare('UPDATE players SET xp = ?, level = ?, max_hp = max_hp + 10, hp = min(hp + 10, max_hp + 10) WHERE id = ?').run(newXp - xpNeeded, new_level, id);
-  } else {
-    db.prepare('UPDATE players SET xp = ? WHERE id = ?').run(newXp, id);
   }
 
-  return { leveled_up, new_level, stat_points };
+  if (leveled_up) {
+    db.prepare('UPDATE players SET xp = ?, level = ?, max_hp = max_hp + ?, hp = min(hp + ?, max_hp + ?) WHERE id = ?')
+      .run(remainingXp, currentLevel, levelsGained * 10, levelsGained * 10, levelsGained * 10, id);
+  } else {
+    db.prepare('UPDATE players SET xp = ? WHERE id = ?').run(remainingXp, id);
+  }
+
+  return { leveled_up, new_level: currentLevel, stat_points: totalStatPoints };
 }
 
 export function killPlayer(id: number, causeOfDeath: string): void {
@@ -112,9 +119,27 @@ export function killPlayer(id: number, causeOfDeath: string): void {
   db.prepare(`
     UPDATE players SET is_alive = 0, died_at = datetime('now'), cause_of_death = ?, hp = 0 WHERE id = ?
   `).run(causeOfDeath, id);
+
+  // Clear revolt votes for chunks this player ruled (before resetting ruler_id)
+  db.prepare(`
+    DELETE FROM revolt_votes WHERE (chunk_x, chunk_y) IN (
+      SELECT x, y FROM chunks WHERE ruler_id = ?
+    )
+  `).run(id);
+
+  // Release all chunks ruled by this player — reset policies to prevent ghost nations
+  db.prepare(`
+    UPDATE chunks SET ruler_id = NULL, chunk_tax_rate = 0,
+      immigration_policy = 'open', immigration_fee = 0,
+      build_policy = 'free', build_fee = 0,
+      exit_policy = 'free', exit_fee = 0,
+      sale_price = NULL
+    WHERE ruler_id = ?
+  `).run(id);
 }
 
 export function updatePlayerGold(id: number, gold: number): void {
   const db = getDb();
-  db.prepare('UPDATE players SET gold = ? WHERE id = ?').run(gold, id);
+  const capped = Math.min(Math.max(0, gold), 10_000_000);
+  db.prepare('UPDATE players SET gold = ? WHERE id = ?').run(capped, id);
 }

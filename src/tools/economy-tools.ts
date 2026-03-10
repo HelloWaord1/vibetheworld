@@ -5,6 +5,9 @@ import { getPlayerByName, updatePlayerGold, getPlayerById } from '../models/play
 import { createTrade, getTradeById, getPendingTradesForPlayer, updateTradeStatus } from '../models/trade.js';
 import { getItemById, getItemsByOwner, transferToPlayer } from '../models/item.js';
 import { logEvent } from '../models/event-log.js';
+import { getDb } from '../db/connection.js';
+import { applyTax } from '../game/tax.js';
+import { enforceCooldown, COOLDOWNS } from '../server/cooldown.js';
 
 export function registerEconomyTools(server: McpServer): void {
   server.tool(
@@ -21,8 +24,13 @@ export function registerEconomyTools(server: McpServer): void {
     async ({ token, to, offer_items, offer_gold, request_items, request_gold }) => {
       try {
         const player = authenticate(token);
+        const cd = enforceCooldown(player.id, 'trade_offer', COOLDOWNS.TRADE_OFFER);
+        if (cd !== null) return { content: [{ type: 'text', text: `Please wait ${cd}s before sending another trade offer.` }] };
         const target = getPlayerByName(to);
         if (!target) return { content: [{ type: 'text', text: `Player "${to}" not found.` }] };
+        if (target.id === player.id) {
+          return { content: [{ type: 'text', text: 'You cannot trade with yourself.' }] };
+        }
         if (target.chunk_x !== player.chunk_x || target.chunk_y !== player.chunk_y) {
           return { content: [{ type: 'text', text: 'You must be in the same chunk to trade.' }] };
         }
@@ -84,42 +92,63 @@ export function registerEconomyTools(server: McpServer): void {
         if (trade.to_id !== player.id) return { content: [{ type: 'text', text: 'This trade is not for you.' }] };
         if (trade.status !== 'pending') return { content: [{ type: 'text', text: `Trade already ${trade.status}.` }] };
 
-        const sender = getPlayerById(trade.from_id);
-        if (!sender || !sender.is_alive) return { content: [{ type: 'text', text: 'Sender is no longer available.' }] };
-
-        // Validate everything still valid
         const offerItems: number[] = JSON.parse(trade.offer_items);
         const requestItems: number[] = JSON.parse(trade.request_items);
 
-        for (const id of offerItems) {
-          const item = getItemById(id);
-          if (!item || item.owner_id !== sender.id) {
-            updateTradeStatus(trade_id, 'rejected');
-            return { content: [{ type: 'text', text: 'Trade invalid — sender no longer has offered items.' }] };
+        // All validation + execution inside transaction to prevent race conditions
+        const db = getDb();
+        let senderName = '';
+        const executeTrade = db.transaction(() => {
+          // Fresh reads inside transaction
+          const freshSender = db.prepare('SELECT * FROM players WHERE id = ? AND is_alive = 1').get(trade.from_id) as any;
+          if (!freshSender) throw new Error('Sender is no longer available.');
+          senderName = freshSender.name;
+
+          const freshPlayer = db.prepare('SELECT * FROM players WHERE id = ?').get(player.id) as any;
+
+          // Validate items still owned by correct parties
+          for (const id of offerItems) {
+            const item = getItemById(id);
+            if (!item || item.owner_id !== freshSender.id) {
+              updateTradeStatus(trade_id, 'rejected');
+              throw new Error('Trade invalid — sender no longer has offered items.');
+            }
           }
-        }
-        for (const id of requestItems) {
-          const item = getItemById(id);
-          if (!item || item.owner_id !== player.id) {
-            updateTradeStatus(trade_id, 'rejected');
-            return { content: [{ type: 'text', text: 'Trade invalid — you no longer have requested items.' }] };
+          for (const id of requestItems) {
+            const item = getItemById(id);
+            if (!item || item.owner_id !== freshPlayer.id) {
+              updateTradeStatus(trade_id, 'rejected');
+              throw new Error('Trade invalid — you no longer have requested items.');
+            }
           }
-        }
-        if (trade.offer_gold > sender.gold || trade.request_gold > player.gold) {
-          updateTradeStatus(trade_id, 'rejected');
-          return { content: [{ type: 'text', text: 'Trade invalid — insufficient gold.' }] };
-        }
+          if (trade.offer_gold > freshSender.gold || trade.request_gold > freshPlayer.gold) {
+            updateTradeStatus(trade_id, 'rejected');
+            throw new Error('Trade invalid — insufficient gold.');
+          }
 
-        // Execute trade
-        for (const id of offerItems) transferToPlayer(id, player.id);
-        for (const id of requestItems) transferToPlayer(id, sender.id);
-        updatePlayerGold(sender.id, sender.gold - trade.offer_gold + trade.request_gold);
-        updatePlayerGold(player.id, player.gold - trade.request_gold + trade.offer_gold);
-        updateTradeStatus(trade_id, 'accepted');
+          // Transfer items
+          for (const id of offerItems) transferToPlayer(id, player.id);
+          for (const id of requestItems) transferToPlayer(id, freshSender.id);
 
-        logEvent('trade_complete', player.id, sender.id, player.chunk_x, player.chunk_y, player.location_id, { trade_id });
+          // Apply taxes on gold using relative SQL updates
+          if (trade.offer_gold > 0) {
+            const offerTax = applyTax(trade.offer_gold, player.chunk_x, player.chunk_y);
+            db.prepare('UPDATE players SET gold = gold - ? WHERE id = ?').run(trade.offer_gold, freshSender.id);
+            db.prepare('UPDATE players SET gold = min(gold + ?, 10000000) WHERE id = ?').run(offerTax.netAmount, freshPlayer.id);
+          }
 
-        return { content: [{ type: 'text', text: `✅ Trade #${trade_id} completed with ${sender.name}!` }] };
+          if (trade.request_gold > 0) {
+            const requestTax = applyTax(trade.request_gold, player.chunk_x, player.chunk_y);
+            db.prepare('UPDATE players SET gold = gold - ? WHERE id = ?').run(trade.request_gold, freshPlayer.id);
+            db.prepare('UPDATE players SET gold = min(gold + ?, 10000000) WHERE id = ?').run(requestTax.netAmount, freshSender.id);
+          }
+
+          updateTradeStatus(trade_id, 'accepted');
+          logEvent('trade_complete', player.id, freshSender.id, player.chunk_x, player.chunk_y, player.location_id, { trade_id });
+        });
+        executeTrade();
+
+        return { content: [{ type: 'text', text: `✅ Trade #${trade_id} completed with ${senderName}! (2.8% platform tax + chunk tax applied on gold)` }] };
       } catch (e: any) {
         return { content: [{ type: 'text', text: e.message }] };
       }

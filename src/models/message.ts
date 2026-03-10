@@ -1,12 +1,19 @@
 import { getDb } from '../db/connection.js';
-import type { Message } from '../types/index.js';
+import type { Message, MessageType } from '../types/index.js';
 
-export function createMessage(fromId: number, toId: number | null, chunkX: number, chunkY: number, content: string): Message {
+export function createMessage(
+  fromId: number,
+  toId: number | null,
+  chunkX: number,
+  chunkY: number,
+  content: string,
+  messageType: MessageType = 'public',
+): Message {
   const db = getDb();
   const result = db.prepare(`
-    INSERT INTO messages (from_id, to_id, chunk_x, chunk_y, content)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(fromId, toId, chunkX, chunkY, content);
+    INSERT INTO messages (from_id, to_id, chunk_x, chunk_y, content, message_type)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(fromId, toId, chunkX, chunkY, content, messageType);
   return db.prepare('SELECT * FROM messages WHERE id = ?').get(result.lastInsertRowid) as Message;
 }
 

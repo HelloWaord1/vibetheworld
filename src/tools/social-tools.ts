@@ -6,18 +6,39 @@ import { getPlayerByName, getPlayersAtChunk } from '../models/player.js';
 import { getPlayerById } from '../models/player.js';
 import { getDb } from '../db/connection.js';
 import type { Player } from '../types/index.js';
+import { enforceCooldown, COOLDOWNS } from '../server/cooldown.js';
+import { validateContent } from '../utils/content-filter.js';
+import { checkMuted } from './admin-tools.js';
+
+/** Check if blockerId has blocked blockedId. */
+function isBlocked(blockerId: number, blockedId: number): boolean {
+  const db = getDb();
+  return !!db.prepare(
+    'SELECT 1 FROM player_blocks WHERE blocker_id = ? AND blocked_id = ?',
+  ).get(blockerId, blockedId);
+}
+
+/** Strip control characters that break JSON parsing on the client side. */
+const sanitizedMessage = z.string().min(1).max(500)
+  .transform(s => s.replace(/[\x00-\x1f]/g, ''));
 
 export function registerSocialTools(server: McpServer): void {
+  // ---------- Chat ----------
+
   server.tool(
     'say',
     'Say something to everyone in your chunk. Visible to all players here.',
     {
       token: z.string().uuid().describe('Your auth token'),
-      message: z.string().min(1).max(500).describe('What you want to say'),
+      message: sanitizedMessage.describe('What you want to say'),
     },
     async ({ token, message: msg }) => {
       try {
         const player = authenticate(token);
+        checkMuted(player.id);
+        validateContent(msg, 'message');
+        const cd = enforceCooldown(player.id, 'say', COOLDOWNS.SAY);
+        if (cd !== null) return { content: [{ type: 'text', text: `Please wait ${cd}s before sending another message.` }] };
         createMessage(player.id, null, player.chunk_x, player.chunk_y, msg);
         return { content: [{ type: 'text', text: `${player.name} says: "${msg}"` }] };
       } catch (e: any) {
@@ -28,23 +49,32 @@ export function registerSocialTools(server: McpServer): void {
 
   server.tool(
     'whisper',
-    'Send a private message to another player in the same chunk.',
+    'Send a private message to any player in the world.',
     {
       token: z.string().uuid().describe('Your auth token'),
       to: z.string().describe('Name of the recipient'),
-      message: z.string().min(1).max(500).describe('Private message'),
+      message: sanitizedMessage.describe('Private message'),
     },
     async ({ token, to, message: msg }) => {
       try {
         const player = authenticate(token);
+        checkMuted(player.id);
+        validateContent(msg, 'message');
+        const cd = enforceCooldown(player.id, 'say', COOLDOWNS.SAY);
+        if (cd !== null) return { content: [{ type: 'text', text: `Please wait ${cd}s before sending another message.` }] };
         const target = getPlayerByName(to);
         if (!target) return { content: [{ type: 'text', text: `Player "${to}" not found.` }] };
-        if (target.chunk_x !== player.chunk_x || target.chunk_y !== player.chunk_y) {
-          return { content: [{ type: 'text', text: `${to} is not in your chunk. You can only whisper to nearby players.` }] };
+        if (target.id === player.id) return { content: [{ type: 'text', text: 'You cannot whisper to yourself.' }] };
+
+        if (isBlocked(target.id, player.id)) {
+          return { content: [{ type: 'text', text: `${target.name} has blocked you.` }] };
         }
 
-        createMessage(player.id, target.id, player.chunk_x, player.chunk_y, msg);
-        return { content: [{ type: 'text', text: `You whisper to ${target.name}: "${msg}"` }] };
+        const crossChunk = target.chunk_x !== player.chunk_x || target.chunk_y !== player.chunk_y;
+        createMessage(player.id, target.id, player.chunk_x, player.chunk_y, msg, 'whisper');
+
+        const suffix = crossChunk ? ' (sent across the world)' : '';
+        return { content: [{ type: 'text', text: `You whisper to ${target.name}: "${msg}"${suffix}` }] };
       } catch (e: any) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -60,11 +90,14 @@ export function registerSocialTools(server: McpServer): void {
         const player = authenticate(token);
         const messages = getRecentMessages(player.chunk_x, player.chunk_y, player.id);
 
-        if (messages.length === 0) {
+        // Filter out messages from players this user has blocked
+        const filtered = messages.filter(m => !isBlocked(player.id, m.from_id));
+
+        if (filtered.length === 0) {
           return { content: [{ type: 'text', text: 'No recent messages.' }] };
         }
 
-        const parts = messages.reverse().map(m => {
+        const parts = filtered.reverse().map(m => {
           const sender = getPlayerById(m.from_id);
           const senderName = sender?.name || 'Unknown';
           if (m.to_id) {
@@ -78,7 +111,7 @@ export function registerSocialTools(server: McpServer): void {
           return `${senderName}: ${m.content}`;
         });
 
-        return { content: [{ type: 'text', text: `💬 Recent messages:\n${parts.join('\n')}` }] };
+        return { content: [{ type: 'text', text: `Recent messages:\n${parts.join('\n')}` }] };
       } catch (e: any) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -104,7 +137,7 @@ export function registerSocialTools(server: McpServer): void {
           WHERE is_alive = 1 AND last_active_at > datetime('now', '-5 minutes')
         `).all() as Pick<Player, 'name' | 'level' | 'chunk_x' | 'chunk_y'>[];
 
-        const parts: string[] = [`👥 Online players: ${online.length}`];
+        const parts: string[] = [`Online players: ${online.length}`];
         if (here.length > 0) {
           parts.push(`\nHere with you:`);
           for (const p of here) parts.push(`  ${p.name} (Lv${p.level})`);

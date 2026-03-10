@@ -4,11 +4,19 @@ import { authenticate } from '../server/auth.js';
 import { getChunk, getAdjacentChunks, acquireLock, suggestDangerLevel } from '../models/chunk.js';
 import { getLocationsInChunk, getLocationById, getChildLocations } from '../models/location.js';
 import { getPlayersAtChunk, updatePlayerPosition } from '../models/player.js';
-import { getItemsAtLocation, getItemsByOwner } from '../models/item.js';
+import { getItemsAtLocation, getItemsByOwner, getItemById } from '../models/item.js';
 import { tryDiscover } from '../game/discovery.js';
-import { DIRECTIONS } from '../types/index.js';
+import { DIRECTIONS, EMERGENCY_ESCAPE_COST } from '../types/index.js';
 import { isValidChunkCoord } from '../game/world-rules.js';
 import { getDb } from '../db/connection.js';
+import { getListingsAtLocation } from '../models/player-listing.js';
+import { getPlayerById, updatePlayerGold } from '../models/player.js';
+import { addChunkRevenue } from '../models/nation.js';
+import { rollEncounter, rollDungeonEncounter, spawnRandomEncounter } from '../game/encounter.js';
+import { getMonstersAtLocation, getEngagedMonster } from '../models/active-monster.js';
+import { getTemplateById } from '../models/monster-template.js';
+import { awardExploreXp } from '../game/xp-rewards.js';
+import { checkCooldown } from '../server/cooldown.js';
 
 export function registerNavigationTools(server: McpServer): void {
   server.tool(
@@ -22,6 +30,20 @@ export function registerNavigationTools(server: McpServer): void {
         if (!chunk) return { content: [{ type: 'text', text: 'Error: You are in a void. This should not happen.' }] };
 
         const parts: string[] = [];
+
+        // Ruler / tax / policy info
+        if (chunk.ruler_id) {
+          const ruler = getPlayerById(chunk.ruler_id);
+          if (ruler) {
+            let rulerLine = `Ruler: ${ruler.name} | Tax: ${chunk.chunk_tax_rate}%`;
+            const policies: string[] = [];
+            if (chunk.immigration_policy !== 'open') policies.push(`Immigration: ${chunk.immigration_policy}${chunk.immigration_fee > 0 ? ` (${chunk.immigration_fee}g)` : ''}`);
+            if (chunk.build_policy !== 'free') policies.push(`Building: ${chunk.build_policy}${chunk.build_fee > 0 ? ` (${chunk.build_fee}g)` : ''}`);
+            if (chunk.exit_policy !== 'free') policies.push(`Exit: ${chunk.exit_policy}${chunk.exit_fee > 0 ? ` (${chunk.exit_fee}g)` : ''}`);
+            if (policies.length > 0) rulerLine += `\n  ${policies.join(' | ')}`;
+            parts.push(rulerLine);
+          }
+        }
 
         if (player.location_id) {
           const loc = getLocationById(player.location_id);
@@ -107,6 +129,35 @@ export function registerNavigationTools(server: McpServer): void {
           }
         }
 
+        // Player shop listings (capped at 20 to prevent output flood)
+        const listings = getListingsAtLocation(player.chunk_x, player.chunk_y, player.location_id);
+        if (listings.length > 0) {
+          const displayListings = listings.slice(0, 20);
+          parts.push(`\nPlayer shops:`);
+          for (const listing of displayListings) {
+            const listItem = getItemById(listing.item_id);
+            const seller = getPlayerById(listing.seller_id);
+            if (listItem && seller) {
+              parts.push(`  [listing #${listing.id}] ${listItem.name} (${listItem.item_type}, ${listItem.rarity}) — ${listing.price}g by ${seller.name}`);
+            }
+          }
+          if (listings.length > 20) {
+            parts.push(`  ...and ${listings.length - 20} more listings`);
+          }
+        }
+
+        // Active monsters
+        const monsters = getMonstersAtLocation(player.chunk_x, player.chunk_y, player.location_id);
+        if (monsters.length > 0) {
+          parts.push(`\nMonsters:`);
+          for (const m of monsters) {
+            const tmpl = getTemplateById(m.template_id);
+            const mName = tmpl?.name ?? 'Unknown';
+            const engaged = m.engaged_by !== null ? (m.engaged_by === player.id ? ' [ENGAGED BY YOU]' : ' [IN COMBAT]') : '';
+            parts.push(`  [${m.id}] ${mName} (${tmpl?.monster_type ?? '?'}) — HP: ${m.hp}/${m.max_hp}${engaged}`);
+          }
+        }
+
         return { content: [{ type: 'text', text: parts.join('\n') }] };
       } catch (e: any) {
         return { content: [{ type: 'text', text: e.message }] };
@@ -130,6 +181,54 @@ export function registerNavigationTools(server: McpServer): void {
           return { content: [{ type: 'text', text: 'You must exit your current location first. Use `exit` to leave.' }] };
         }
 
+        // Check PvE engagement — cannot move while fighting a monster
+        const engaged = getEngagedMonster(player.id);
+        if (engaged) {
+          return { content: [{ type: 'text', text: 'You are engaged with a monster! Defeat it or use `flee_monster` first.' }] };
+        }
+
+        // Check PvP combat lock — cannot move for 10s after PvP combat
+        const combatLockRemaining = checkCooldown(player.id, 'combat_lock');
+        if (combatLockRemaining !== null) {
+          return { content: [{ type: 'text', text: `You are locked in PvP combat! You cannot move for ${combatLockRemaining} more seconds. Fight or wait it out.` }] };
+        }
+
+        // Check exit policy of current chunk
+        let exitNotice = '';
+        const currentChunk = getChunk(player.chunk_x, player.chunk_y);
+        if (currentChunk && currentChunk.ruler_id !== null && currentChunk.ruler_id !== player.id) {
+          if (currentChunk.exit_policy === 'locked') {
+            const freshPlayer = getPlayerById(player.id)!;
+            // Free escape for newcomers (level 1-2)
+            if (freshPlayer.level <= 2) {
+              exitNotice = 'As a newcomer, the guards let you pass without payment.\n';
+            } else if (freshPlayer.gold < EMERGENCY_ESCAPE_COST) {
+              return { content: [{ type: 'text', text: `This nation has locked borders. Emergency escape costs ${EMERGENCY_ESCAPE_COST}g (you have ${freshPlayer.gold}g). Use \`revolt\` to overthrow the ruler.` }] };
+            } else {
+              // Emergency escape: pay EMERGENCY_ESCAPE_COST to force exit
+              const db = getDb();
+              db.prepare('UPDATE players SET gold = gold - ? WHERE id = ?').run(EMERGENCY_ESCAPE_COST, player.id);
+              // Ruler gets half of emergency escape cost
+              if (currentChunk.ruler_id) {
+                db.prepare('UPDATE players SET gold = min(gold + ?, 10000000) WHERE id = ?').run(Math.floor(EMERGENCY_ESCAPE_COST / 2), currentChunk.ruler_id);
+              }
+              addChunkRevenue(player.chunk_x, player.chunk_y, EMERGENCY_ESCAPE_COST);
+            }
+          }
+          if (currentChunk.exit_policy === 'fee' && currentChunk.exit_fee > 0) {
+            const freshPlayer = getPlayerById(player.id)!;
+            if (freshPlayer.gold < currentChunk.exit_fee) {
+              return { content: [{ type: 'text', text: `Exit fee: ${currentChunk.exit_fee}g. You only have ${freshPlayer.gold}g.` }] };
+            }
+            const db = getDb();
+            db.prepare('UPDATE players SET gold = gold - ? WHERE id = ?').run(currentChunk.exit_fee, player.id);
+            if (currentChunk.ruler_id) {
+              db.prepare('UPDATE players SET gold = min(gold + ?, 10000000) WHERE id = ?').run(currentChunk.exit_fee, currentChunk.ruler_id);
+            }
+            addChunkRevenue(player.chunk_x, player.chunk_y, currentChunk.exit_fee);
+          }
+        }
+
         const [dx, dy] = DIRECTIONS[direction];
         const newX = player.chunk_x + dx;
         const newY = player.chunk_y + dy;
@@ -140,8 +239,78 @@ export function registerNavigationTools(server: McpServer): void {
 
         const existing = getChunk(newX, newY);
         if (existing) {
+          // Check immigration policy
+          if (existing.ruler_id !== null && existing.ruler_id !== player.id) {
+            if (existing.immigration_policy === 'closed' || existing.immigration_policy === 'selective') {
+              return { content: [{ type: 'text', text: `${existing.name} has closed borders. You cannot enter.` }] };
+            }
+            if (existing.immigration_policy === 'fee' && existing.immigration_fee > 0) {
+              const freshPlayer = getPlayerById(player.id)!;
+              if (freshPlayer.gold < existing.immigration_fee) {
+                return { content: [{ type: 'text', text: `${existing.name} charges an immigration fee of ${existing.immigration_fee}g. You only have ${freshPlayer.gold}g.` }] };
+              }
+              const db = getDb();
+              db.prepare('UPDATE players SET gold = gold - ? WHERE id = ?').run(existing.immigration_fee, player.id);
+              if (existing.ruler_id) {
+                db.prepare('UPDATE players SET gold = min(gold + ?, 10000000) WHERE id = ?').run(existing.immigration_fee, existing.ruler_id);
+              }
+              addChunkRevenue(newX, newY, existing.immigration_fee);
+            }
+          }
+
+          // Warn about non-free exit policies before entering
+          let entryWarning = '';
+          if (existing.exit_policy !== 'free' && existing.ruler_id !== null && existing.ruler_id !== player.id) {
+            const currentGold = getPlayerById(player.id)!.gold;
+            entryWarning = `\u26a0 WARNING: This chunk has locked borders. Emergency escape costs ${EMERGENCY_ESCAPE_COST}g. Your gold: ${currentGold}g.\n\n`;
+          }
+
           updatePlayerPosition(player.id, newX, newY, null);
-          return { content: [{ type: 'text', text: `You travel ${direction} to ${existing.name} (${newX},${newY}).\n\n${existing.description}\nTerrain: ${existing.terrain_type} | Danger: ${'⚠️'.repeat(existing.danger_level)}` }] };
+          let moveText = `${exitNotice}${entryWarning}You travel ${direction} to ${existing.name} (${newX},${newY}).\n\n${existing.description}\nTerrain: ${existing.terrain_type} | Danger: ${'⚠️'.repeat(existing.danger_level)}`;
+          if (existing.ruler_id) {
+            const ruler = getPlayerById(existing.ruler_id);
+            if (ruler) {
+              moveText += `\n👑 Ruler: ${ruler.name} | Tax: ${existing.chunk_tax_rate}%`;
+              if (existing.immigration_policy !== 'open') {
+                moveText += ` | Immigration: ${existing.immigration_policy}`;
+              }
+              if (existing.exit_policy !== 'free') {
+                moveText += ` | Exit: ${existing.exit_policy}${existing.exit_fee > 0 ? ` (${existing.exit_fee}g)` : ''}`;
+              }
+            }
+          }
+
+          // Explore XP: atomically check-and-insert inside a transaction to prevent race condition
+          const db = getDb();
+          const awardExploreXpIfNew = db.transaction(() => {
+            const visitCheck = db.prepare(
+              "SELECT 1 FROM event_log WHERE event_type = 'chunk_explore' AND actor_id = ? AND chunk_x = ? AND chunk_y = ?"
+            ).get(player.id, newX, newY);
+            if (visitCheck) return null;
+            db.prepare(
+              "INSERT INTO event_log (event_type, actor_id, chunk_x, chunk_y, data) VALUES ('chunk_explore', ?, ?, ?, '{}')"
+            ).run(player.id, newX, newY);
+            return awardExploreXp(player.id);
+          });
+          const xpResult = awardExploreXpIfNew();
+          if (xpResult) {
+            moveText += `\n+${xpResult.xp} XP (new territory!)`;
+            if (xpResult.leveled_up) {
+              moveText += ` LEVEL UP! You are now level ${xpResult.new_level}.`;
+            }
+          }
+
+          // Random encounter check
+          if (rollEncounter(existing.danger_level)) {
+            const spawned = spawnRandomEncounter(newX, newY, null, existing.danger_level);
+            if (spawned) {
+              const tmpl = getTemplateById(spawned.template_id);
+              moveText += `\n\nA wild ${tmpl?.name ?? 'monster'} appears! (HP: ${spawned.hp}/${spawned.max_hp}) [ID: ${spawned.id}]`;
+              moveText += `\nUse \`attack_monster\` to fight or \`flee_monster\` to run.`;
+            }
+          }
+
+          return { content: [{ type: 'text', text: moveText }] };
         }
 
         // Chunk doesn't exist — try to acquire lock
@@ -177,6 +346,13 @@ export function registerNavigationTools(server: McpServer): void {
     async ({ token, location_id }) => {
       try {
         const player = authenticate(token);
+
+        // Check PvP combat lock
+        const enterCombatLock = checkCooldown(player.id, 'combat_lock');
+        if (enterCombatLock !== null) {
+          return { content: [{ type: 'text', text: `You are locked in PvP combat! You cannot enter locations for ${enterCombatLock} more seconds.` }] };
+        }
+
         const loc = getLocationById(location_id);
         if (!loc) return { content: [{ type: 'text', text: 'Location not found.' }] };
         if (loc.chunk_x !== player.chunk_x || loc.chunk_y !== player.chunk_y) {
@@ -202,14 +378,29 @@ export function registerNavigationTools(server: McpServer): void {
         // Key check
         if (loc.required_key_id !== null) {
           const playerItems = getItemsByOwner(player.id);
-          const hasKey = playerItems.some(i => i.id === loc.required_key_id || (i.item_type === 'key' && i.name === 'Skeleton Key'));
+          const hasKey = playerItems.some(i => i.id === loc.required_key_id || (i.item_type === 'key' && i.rarity === 'rare'));
           if (!hasKey) {
             return { content: [{ type: 'text', text: `This location is locked. You need the right key to enter.` }] };
           }
         }
 
         updatePlayerPosition(player.id, player.chunk_x, player.chunk_y, loc.id);
-        return { content: [{ type: 'text', text: `You enter ${loc.name}.\n\n${loc.description}` }] };
+
+        let enterText = `You enter ${loc.name}.\n\n${loc.description}`;
+
+        // Dungeon encounter check
+        if (loc.location_type === 'dungeon' && rollDungeonEncounter()) {
+          const chunk = getChunk(player.chunk_x, player.chunk_y);
+          const dangerLevel = chunk?.danger_level ?? 1;
+          const spawned = spawnRandomEncounter(player.chunk_x, player.chunk_y, loc.id, dangerLevel);
+          if (spawned) {
+            const tmpl = getTemplateById(spawned.template_id);
+            enterText += `\n\nA ${tmpl?.name ?? 'monster'} lurks in the darkness! (HP: ${spawned.hp}/${spawned.max_hp}) [ID: ${spawned.id}]`;
+            enterText += `\nUse \`attack_monster\` to fight or \`flee_monster\` to run.`;
+          }
+        }
+
+        return { content: [{ type: 'text', text: enterText }] };
       } catch (e: any) {
         return { content: [{ type: 'text', text: e.message }] };
       }
@@ -223,6 +414,13 @@ export function registerNavigationTools(server: McpServer): void {
     async ({ token }) => {
       try {
         const player = authenticate(token);
+
+        // Check PvP combat lock
+        const exitCombatLock = checkCooldown(player.id, 'combat_lock');
+        if (exitCombatLock !== null) {
+          return { content: [{ type: 'text', text: `You are locked in PvP combat! You cannot exit for ${exitCombatLock} more seconds.` }] };
+        }
+
         if (player.location_id === null) {
           return { content: [{ type: 'text', text: 'You are already outside. Use `move` to travel to another chunk.' }] };
         }

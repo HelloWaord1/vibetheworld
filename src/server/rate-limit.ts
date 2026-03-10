@@ -5,6 +5,7 @@ interface RateBucket {
   resetAt: number;
 }
 
+const MAX_BUCKETS = 10_000;
 const buckets = new Map<string, RateBucket>();
 
 // Clean up expired entries every 5 minutes
@@ -15,6 +16,12 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
+function evictOldest(): void {
+  // Map iterates in insertion order — first key is oldest
+  const firstKey = buckets.keys().next().value;
+  if (firstKey !== undefined) buckets.delete(firstKey);
+}
+
 export function rateLimit(maxRequests: number, windowMs: number) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const key = req.ip || req.socket.remoteAddress || 'unknown';
@@ -22,6 +29,10 @@ export function rateLimit(maxRequests: number, windowMs: number) {
     let bucket = buckets.get(key);
 
     if (!bucket || bucket.resetAt <= now) {
+      // Evict oldest if at capacity
+      if (!buckets.has(key) && buckets.size >= MAX_BUCKETS) {
+        evictOldest();
+      }
       bucket = { count: 0, resetAt: now + windowMs };
       buckets.set(key, bucket);
     }

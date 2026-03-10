@@ -34,7 +34,7 @@ src/
   tools/              — MCP tool registrations (auth, navigation, chunk, inventory, combat, social, economy, info)
   game/               — Game logic (combat, leveling, discovery, dice, world-rules)
   types/index.ts      — All interfaces + constants
-  utils/              — crypto (bcrypt/uuid), validation (zod), logger
+  utils/              — crypto (bcrypt/uuid), logger
 tests/                — vitest tests
 ```
 
@@ -46,7 +46,11 @@ tests/                — vitest tests
 - **Coordinate range**: -99 to 99 on both axes. Origin (0,0) is The Nexus.
 - **Permadeath**: Dead player names can be reused (unique index only on alive players).
 - **Stat bonuses**: Items with `stat_bonuses` JSON apply/remove stats on equip/unequip.
-- **Key items**: Locations can have `required_key_id`. Keys are checked automatically on `enter`.
+- **Key items**: Locations can have `required_key_id`. Keys are checked automatically on `enter`. Rare keys bypass all locks.
+- **Inventory limit**: 20 items max per player. Currency items bypass (convert to gold on pickup).
+- **Crit cap**: Max crit chance is 25% (d20 <= 5), regardless of luck.
+- **Transactions**: Combat deaths and trades are wrapped in SQLite transactions for data integrity.
+- **Password minimum**: 6 characters.
 
 ## Adding a New MCP Tool
 

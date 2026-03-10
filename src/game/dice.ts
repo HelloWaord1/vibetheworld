@@ -9,3 +9,5 @@ export function d6(): number { return roll(6).roll; }
 export function d8(): number { return roll(8).roll; }
 export function d12(): number { return roll(12).roll; }
 export function d20(): number { return roll(20).roll; }
+
+export function d100(): number { return roll(100).roll; }

@@ -15,7 +15,21 @@ logger.info('server', 'Database migrated and seeded');
 
 // HTTP Server (health, API)
 const app = createHttpServer();
-app.use(express.json());
+app.set('env', 'production');
+app.use(express.json({ limit: '1mb' }));
+
+// Handle JSON parse errors with a proper JSON-RPC error response
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err.type === 'entity.parse.failed') {
+    res.status(400).json({
+      jsonrpc: '2.0',
+      error: { code: -32700, message: 'Parse error: Invalid JSON' },
+      id: null,
+    });
+    return;
+  }
+  next(err);
+});
 
 // Rate limits: 120 MCP requests per minute, 30 API requests per minute
 const mcpLimiter = rateLimit(120, 60_000);
@@ -63,6 +77,18 @@ app.delete('/mcp', (_req: express.Request, res: express.Response) => {
     error: { code: -32000, message: 'Session termination not supported in stateless mode' },
     id: null,
   });
+});
+
+// Sanitize all error responses — never expose stack traces
+app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logger.error('http', 'Unhandled error', { error: err.message });
+  if (!res.headersSent) {
+    res.status(500).json({
+      jsonrpc: '2.0',
+      error: { code: -32603, message: 'Internal server error' },
+      id: null,
+    });
+  }
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
