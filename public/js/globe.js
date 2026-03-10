@@ -29,49 +29,58 @@
     uniform float u_time;
     uniform vec2 u_mouse;
 
-    // Hash function for pseudo-random digits
+    // Hash — good distribution for noise + digit selection
     float hash(vec2 p) {
-      p = fract(p * vec2(123.34, 456.21));
-      p += dot(p, p + 45.32);
-      return fract(p.x * p.y);
+      vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+      p3 += dot(p3, p3.yzx + 33.33);
+      return fract((p3.x + p3.y) * p3.z);
     }
 
-    // 5x7 bitmap font for digits 0-1
-    // Each row is 5 bits wide, 7 rows tall
-    float digit0(vec2 p) {
-      // 0: 01110 / 10001 / 10011 / 10101 / 11001 / 10001 / 01110
-      int row = int(p.y);
-      int col = int(p.x);
-      if (row == 0) { if (col>=1 && col<=3) return 1.0; }
-      if (row == 1) { if (col==0 || col==4) return 1.0; }
-      if (row == 2) { if (col==0 || col==3 || col==4) return 1.0; }
-      if (row == 3) { if (col==0 || col==2 || col==4) return 1.0; }
-      if (row == 4) { if (col==0 || col==1 || col==4) return 1.0; }
-      if (row == 5) { if (col==0 || col==4) return 1.0; }
-      if (row == 6) { if (col>=1 && col<=3) return 1.0; }
-      return 0.0;
+    // Smooth 2D value noise
+    float noise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i);
+      float b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0));
+      float d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
     }
 
-    float digit1(vec2 p) {
-      // 1: 00100 / 01100 / 00100 / 00100 / 00100 / 00100 / 01110
-      int row = int(p.y);
-      int col = int(p.x);
-      if (row == 0) { if (col==2) return 1.0; }
-      if (row == 1) { if (col==1 || col==2) return 1.0; }
-      if (row == 2) { if (col==2) return 1.0; }
-      if (row == 3) { if (col==2) return 1.0; }
-      if (row == 4) { if (col==2) return 1.0; }
-      if (row == 5) { if (col==2) return 1.0; }
-      if (row == 6) { if (col>=1 && col<=3) return 1.0; }
-      return 0.0;
+    // Fractal brownian motion — organic continent shapes
+    float fbm(vec2 p) {
+      float v = 0.0;
+      float a = 0.5;
+      vec2 shift = vec2(100.0);
+      for (int i = 0; i < 5; i++) {
+        v += a * noise(p);
+        p = p * 2.0 + shift;
+        a *= 0.5;
+      }
+      return v;
+    }
+
+    // Domain-warped fbm for natural continent outlines
+    float continentNoise(vec2 p) {
+      vec2 q = vec2(fbm(p + vec2(1.7, 9.2)), fbm(p + vec2(8.3, 2.8)));
+      return fbm(p + 1.8 * q);
+    }
+
+    // 3x5 compact bitmap digit — encoded as 15 bits in a float
+    // Bit index = col + row*3 (col 0-2, row 0-4)
+    float getBit(float bitmap, vec2 p) {
+      float idx = p.x + p.y * 3.0;
+      return mod(floor(bitmap / pow(2.0, idx)), 2.0);
     }
 
     float renderDigit(vec2 cellUV, float which) {
-      // Scale UV to 5x7 grid within cell
-      vec2 p = cellUV * vec2(5.0, 7.0);
-      if (p.x < 0.0 || p.x >= 5.0 || p.y < 0.0 || p.y >= 7.0) return 0.0;
-      if (which < 0.5) return digit0(floor(p));
-      return digit1(floor(p));
+      vec2 p = floor(cellUV * vec2(3.0, 5.0));
+      if (p.x < 0.0 || p.x >= 3.0 || p.y < 0.0 || p.y >= 5.0) return 0.0;
+      // 0 bitmap: .#. / #.# / #.# / #.# / .#.  = 11114.0
+      // 1 bitmap: .#. / ##. / .#. / .#. / ### = 29850.0
+      float bitmap = which < 0.5 ? 11114.0 : 29850.0;
+      return getBit(bitmap, p);
     }
 
     void main() {
@@ -81,7 +90,7 @@
       // Mouse-based tilt (subtle)
       vec2 tilt = (u_mouse - 0.5) * 0.3;
 
-      // Ray origin and direction (orthographic-ish, camera at z=3)
+      // Ray origin and direction
       vec3 ro = vec3(0.0, 0.0, 3.0);
       vec3 rd = normalize(vec3(p.x + tilt.x, p.y + tilt.y, -1.5));
 
@@ -103,27 +112,33 @@
         float theta = atan(normal.x, normal.z) + rot;
         float phi = asin(clamp(normal.y, -1.0, 1.0));
 
-        // Grid cells: 60 columns x 30 rows
-        float cols = 60.0;
-        float rows = 30.0;
+        // --- Continent mask (domain-warped fbm) ---
+        vec2 geoUV = vec2(theta / 6.28318 * 6.0, (phi / 3.14159 + 0.5) * 3.0);
+        float landNoise = continentNoise(geoUV + vec2(42.0, 17.0));
+        float land = smoothstep(0.44, 0.56, landNoise);
+
+        // --- Dense digit grid: 160 cols x 80 rows ---
+        float gridCols = 160.0;
+        float gridRows = 80.0;
         vec2 gridUV = vec2(
-          fract(theta / 6.28318 * cols),
-          fract((phi / 3.14159 + 0.5) * rows)
+          fract(theta / 6.28318 * gridCols),
+          fract((phi / 3.14159 + 0.5) * gridRows)
         );
 
-        // Determine which digit (0 or 1) — changes every 2 seconds
         vec2 cellID = vec2(
-          floor(theta / 6.28318 * cols),
-          floor((phi / 3.14159 + 0.5) * rows)
+          floor(theta / 6.28318 * gridCols),
+          floor((phi / 3.14159 + 0.5) * gridRows)
         );
+
+        // Digit selection — morphs every 2 seconds
         float morphTime = floor(u_time * 0.5);
         float digitSeed = hash(cellID + morphTime * 0.1);
         float which = step(0.5, digitSeed);
 
-        // Render the digit bitmap
+        // Render the compact 3x5 digit
         float d = renderDigit(gridUV, which);
 
-        // Lighting
+        // --- Lighting ---
         vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
         float diffuse = max(dot(normal, lightDir), 0.0);
         float ambient = 0.15;
@@ -132,26 +147,30 @@
         // Fresnel rim glow
         float fresnel = pow(1.0 - max(dot(normal, -rd), 0.0), 3.0);
 
-        // Base color: matrix green
         vec3 green = vec3(0.0, 1.0, 0.255);
 
-        // Digit color with brightness variation
-        float brightness = 0.3 + d * 0.7;
+        // --- Continent coloring ---
+        // Land: bright visible digits. Ocean: very dim, barely visible
+        float cellRand = hash(cellID * 7.31);
+        float landBright = (0.5 + d * 0.5) * (0.7 + cellRand * 0.3);
+        float oceanBright = 0.02 + d * 0.04;
+        float brightness = mix(oceanBright, landBright, land);
+
         col = green * brightness * light;
 
-        // Add subtle cell grid lines
-        vec2 gridEdge = abs(gridUV - 0.5) * 2.0;
-        float gridLine = smoothstep(0.9, 1.0, max(gridEdge.x, gridEdge.y));
-        col = mix(col, green * 0.05, gridLine * 0.5);
+        // Coastline glow — bright edge where land meets ocean
+        float coastDist = abs(landNoise - 0.50);
+        float coastGlow = smoothstep(0.08, 0.0, coastDist) * 0.35;
+        col += green * coastGlow * light;
 
-        // Add rim glow
+        // Rim glow
         col += green * fresnel * 0.4;
 
         // Scanline effect
         float scanline = sin(gl_FragCoord.y * 1.5) * 0.5 + 0.5;
         col *= 0.92 + 0.08 * scanline;
 
-        // Slight vignette on sphere edges
+        // Edge vignette on sphere
         col *= smoothstep(0.0, 0.15, 1.0 - fresnel * 0.5);
       }
 
